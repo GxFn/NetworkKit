@@ -9,8 +9,6 @@ private let logger = Logger(subsystem: "com.networkkit", category: "Cache")
 public enum CachePolicy: Sendable {
     /// 不缓存
     case none
-    /// 使用 URLCache 默认行为
-    case urlCache
     /// 内存缓存指定时长
     case memory(ttl: TimeInterval)
 }
@@ -46,10 +44,6 @@ public final class CacheMiddleware: Middleware, @unchecked Sendable {
         cache.countLimit = maxEntries
     }
 
-    public func adapt(_ request: URLRequest, context: RequestContext) async throws -> URLRequest {
-        request
-    }
-
     /// 响应拦截：自动缓存 GET 请求结果
     public func didReceive(data: Data, response: URLResponse, context: RequestContext) async throws -> Data {
         // 只缓存 GET + 200 的响应
@@ -71,8 +65,7 @@ public final class CacheMiddleware: Middleware, @unchecked Sendable {
         switch policy {
         case .memory(let t):
             ttl = t
-        case .some(.none), .some(.urlCache), nil:
-            // 没有显式策略或非内存缓存策略时不缓存
+        case .some(.none), nil:
             return data
         }
 
@@ -82,10 +75,6 @@ public final class CacheMiddleware: Middleware, @unchecked Sendable {
         logger.debug("Cache stored: \(context.path) (TTL=\(ttl ?? self.defaultTTL)s)")
 
         return data
-    }
-
-    public func recover(from error: NetworkError, context: RequestContext) async throws -> RecoveryAction? {
-        nil
     }
 
     // MARK: - Public API

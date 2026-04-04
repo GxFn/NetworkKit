@@ -1,5 +1,6 @@
 // MARK: - HTTP Method
 
+import Alamofire
 import Foundation
 
 /// HTTP 请求方法
@@ -20,4 +21,9 @@ public struct HTTPMethod: RawRepresentable, Hashable, Sendable {
     public static let patch   = HTTPMethod(rawValue: "PATCH")
     public static let head    = HTTPMethod(rawValue: "HEAD")
     public static let options = HTTPMethod(rawValue: "OPTIONS")
+
+    /// 转为 Alamofire HTTPMethod（模块内部使用）
+    var alamofire: Alamofire.HTTPMethod {
+        Alamofire.HTTPMethod(rawValue: rawValue)
+    }
 }

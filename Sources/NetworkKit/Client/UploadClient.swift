@@ -90,12 +90,11 @@ public struct UploadClient: Sendable {
         headers: [String: String]? = nil,
         progress: UploadProgress? = nil
     ) async throws -> UploadResult<T> {
-        let afMethod = Alamofire.HTTPMethod(rawValue: method.rawValue)
         let httpHeaders = headers.map { dict in
             HTTPHeaders(dict.map { HTTPHeader(name: $0.key, value: $0.value) })
         }
 
-        let request = sessionPool.session(for: .standard).upload(
+        let request = sessionPool.session(for: .upload).upload(
             multipartFormData: { formData in
                 for item in items {
                     switch item {
@@ -111,7 +110,7 @@ public struct UploadClient: Sendable {
                 }
             },
             to: url,
-            method: afMethod,
+            method: method.alamofire,
             headers: httpHeaders
         )
 
@@ -128,15 +127,14 @@ public struct UploadClient: Sendable {
         headers: [String: String]? = nil,
         progress: UploadProgress? = nil
     ) async throws -> UploadResult<T> {
-        let afMethod = Alamofire.HTTPMethod(rawValue: method.rawValue)
         let httpHeaders = headers.map { dict in
             HTTPHeaders(dict.map { HTTPHeader(name: $0.key, value: $0.value) })
         }
 
-        let request = sessionPool.session(for: .standard).upload(
+        let request = sessionPool.session(for: .upload).upload(
             uploadData,
             to: url,
-            method: afMethod,
+            method: method.alamofire,
             headers: httpHeaders
         )
 
@@ -163,23 +161,26 @@ public struct UploadClient: Sendable {
             }
         }
 
-        let data = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
-            request.responseData { response in
-                switch response.result {
-                case .success(let data):
-                    if let statusCode = response.response?.statusCode, !(200..<300).contains(statusCode) {
-                        continuation.resume(throwing: NetworkError.httpStatus(
-                            code: statusCode, data: data, requestID: requestID
-                        ))
-                    } else {
-                        continuation.resume(returning: data)
-                    }
-                case .failure(let error):
-                    continuation.resume(throwing: NetworkError.transport(
-                        underlying: error, requestID: requestID
-                    ))
-                }
-            }
+        // 使用 Alamofire .validate() + 原生 async API
+        let response = await request
+            .validate(statusCode: 200..<300)
+            .serializingData()
+            .response
+
+        if let afError = response.error {
+            throw NetworkError.from(
+                afError: afError,
+                response: response.response,
+                data: response.data,
+                requestID: requestID
+            )
+        }
+
+        guard let data = response.data else {
+            throw NetworkError.transport(
+                underlying: URLError(.badServerResponse),
+                requestID: requestID
+            )
         }
 
         let context = RequestContext(id: requestID, path: url.path)

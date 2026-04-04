@@ -36,8 +36,4 @@ public struct SigningMiddleware: Middleware {
         mutableRequest.url = signedURL
         return mutableRequest
     }
-
-    public func recover(from error: NetworkError, context: RequestContext) async throws -> RecoveryAction? {
-        nil
-    }
 }

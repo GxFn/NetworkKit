@@ -17,10 +17,26 @@ public protocol NetworkClientProtocol: Sendable {
 /// 网络客户端：请求发送 + 中间件编排
 ///
 /// 整个网络层的 **唯一出口**。
-/// 调用流程：
+///
+/// ## 两层拦截架构
+///
+/// **Layer 1 — Alamofire Session 级别**（通过 `SessionPool` 的 `Interceptor` 配置）
+/// - `adapt`: 无状态请求修改（DefaultHeaders 等不依赖 RequestContext 的中间件）
+/// - `retry`: 传输层重试由 `NetworkKitRetryPolicy` 处理（超时/DNS/连接丢失等）
+///
+/// **Layer 2 — NetworkClient Pipeline 级别**（通过 `middlewares` 参数配置）
+/// - `adapt`: 有状态请求修改（Signing、RateLimit 等需要 RequestContext 的中间件）
+/// - `didReceive`: 响应后处理（缓存等）
+/// - `recover`: 业务级恢复（token 刷新等，仅在 Alamofire 重试不适用时触发）
+///
+/// > **注意**: 需要 `RequestContext` 的中间件（如 SigningMiddleware）必须放在 Pipeline 级别。
+/// > Session 级别的 `MiddlewareAdapter` 会创建临时 Context，缺少 `requiresSigning` 等元数据。
+///
 /// ```
-/// Endpoint → RequestContext → adapt(URLRequest) → Session.request → decode → return
-///                     ↑ retry ← recover(error) ← catch
+/// send() → cache check → CB preCheck → dedup
+///     ↓
+/// execute() → adapt pipeline → Alamofire Session → didReceive pipeline → decode
+///                                                        ↑ business recover
 /// ```
 public struct NetworkClient: NetworkClientProtocol {
 
@@ -30,24 +46,66 @@ public struct NetworkClient: NetworkClientProtocol {
     private let sessionPool: SessionPool
     private let middlewares: [any Middleware]
     private let decoder: ResponseDecoder
+    private let circuitBreaker: CircuitBreaker?
+    private let deduplicator: RequestDeduplicator?
 
     public init(
         defaultBaseURL: String,
         sessionPool: SessionPool = .shared,
         middlewares: [any Middleware] = [],
-        decoder: ResponseDecoder = .default
+        decoder: ResponseDecoder = .default,
+        circuitBreaker: CircuitBreaker? = nil,
+        deduplicator: RequestDeduplicator? = nil
     ) {
         self.defaultBaseURL = defaultBaseURL
         self.sessionPool = sessionPool
         self.middlewares = middlewares
         self.decoder = decoder
+        self.circuitBreaker = circuitBreaker
+        self.deduplicator = deduplicator
     }
 
     // MARK: - Send
 
     public func send<T: Decodable & Sendable>(_ endpoint: Endpoint<T>) async throws -> T {
+        // 1. 内存缓存命中 → 跳过网络请求
+        if let cached: T = checkCache(for: endpoint) {
+            return cached
+        }
+
+        // 2. 熔断器预检 → 快速失败
+        try circuitBreaker?.preCheck()
+
+        // 3. 注册缓存策略（didReceive 阶段使用）
         let context = RequestContext(endpoint: endpoint)
-        return try await execute(endpoint, context: context)
+        registerCachePolicy(endpoint, context: context)
+
+        // 4. 执行请求（支持去重）
+        if let deduplicator {
+            return try await deduplicator.deduplicate(
+                key: Self.deduplicationKey(for: endpoint)
+            ) {
+                try await self.executeWithCircuitBreaker(endpoint, context: context)
+            }
+        }
+
+        return try await executeWithCircuitBreaker(endpoint, context: context)
+    }
+
+    // MARK: - Circuit Breaker Wrapper
+
+    private func executeWithCircuitBreaker<T: Decodable & Sendable>(
+        _ endpoint: Endpoint<T>,
+        context: RequestContext
+    ) async throws -> T {
+        do {
+            let result = try await execute(endpoint, context: context)
+            circuitBreaker?.recordSuccess()
+            return result
+        } catch {
+            circuitBreaker?.recordFailure()
+            throw error
+        }
     }
 
     // MARK: - Core Pipeline
@@ -59,51 +117,57 @@ public struct NetworkClient: NetworkClientProtocol {
         try Task.checkCancellation()
 
         do {
-            // 1. 构建 URLRequest
-            var urlRequest = try buildURLRequest(endpoint)
+            // 1. Endpoint → URLRequest（参数编码由 Endpoint.asURLRequest 统一处理）
+            var urlRequest = try endpoint.asURLRequest(baseURL: defaultBaseURL)
 
-            // 2. 中间件 adapt 链
+            // 2. Pipeline adapt 中间件链（Signing、RateLimit、Log 等需要 Context 的中间件）
             for middleware in middlewares {
                 urlRequest = try await middleware.adapt(urlRequest, context: context)
             }
 
-            // 3. 选择 Session 并发送
+            // 3. Alamofire 发送请求
+            //    Session 级 Interceptor.adapt() 处理无状态修改（DefaultHeaders 等）
+            //    Session 级 RetryPolicy 处理传输层重试
             let session = sessionPool.session(for: endpoint.priority)
             let (rawData, urlResponse) = try await performRequest(urlRequest, session: session, context: context)
 
-            // 4. 中间件 didReceive 链
+            // 4. didReceive 中间件链（缓存、日志等响应后处理）
             var data = rawData
             for middleware in middlewares {
                 data = try await middleware.didReceive(data: data, response: urlResponse, context: context)
             }
 
-            // 5. 解码
+            // 5. 解码 + 业务校验
             let result = try decoder.decode(T.self, from: data, context: context)
 
             logger.debug("[\(context.id.prefix(8))] ✔ \(endpoint.path) (\(String(format: "%.0f", context.elapsed * 1000))ms)")
             return result
 
         } catch let error as NetworkError {
-            return try await attemptRecovery(from: error, endpoint: endpoint, context: context)
+            return try await attemptBusinessRecovery(from: error, endpoint: endpoint, context: context)
         } catch {
             let networkError = NetworkError.transport(underlying: error, requestID: context.id)
-            return try await attemptRecovery(from: networkError, endpoint: endpoint, context: context)
+            return try await attemptBusinessRecovery(from: networkError, endpoint: endpoint, context: context)
         }
     }
 
-    // MARK: - Recovery
+    // MARK: - Business-Level Recovery
 
-    /// 全局最大重试次数，防止无限重试循环
-    private static let maxGlobalRetries = 5
+    /// 业务级恢复（仅处理 Alamofire 无法自动重试的业务错误）
+    ///
+    /// 传输层重试（超时/DNS/连接丢失等）已由 Alamofire `RetryPolicy` 在 Session 级处理。
+    /// 此方法仅处理业务层恢复，如：
+    /// - token 过期 → 刷新后重试
+    /// - 业务限流 → 等待后重试
+    private static let maxBusinessRetries = 3
 
-    private func attemptRecovery<T: Decodable & Sendable>(
+    private func attemptBusinessRecovery<T: Decodable & Sendable>(
         from error: NetworkError,
         endpoint: Endpoint<T>,
         context: RequestContext
     ) async throws -> T {
-        // 超过全局重试上限 → 直接失败
-        guard context.retryCount < Self.maxGlobalRetries else {
-            logger.warning("[\(context.id.prefix(8))] Max retries (\(Self.maxGlobalRetries)) exceeded")
+        guard context.retryCount < Self.maxBusinessRetries else {
+            logger.warning("[\(context.id.prefix(8))] Business recovery exhausted (\(Self.maxBusinessRetries) attempts)")
             throw error
         }
 
@@ -121,89 +185,6 @@ public struct NetworkClient: NetworkClientProtocol {
         throw error
     }
 
-    // MARK: - Build URLRequest
-
-    private func buildURLRequest<T>(_ endpoint: Endpoint<T>) throws -> URLRequest {
-        let baseURL = endpoint.baseURL ?? defaultBaseURL
-        let urlString = baseURL + endpoint.path
-
-        guard let url = URL(string: urlString) else {
-            throw NetworkError.invalidURL(urlString)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = endpoint.method.rawValue
-
-        if let timeout = endpoint.timeout {
-            request.timeoutInterval = timeout
-        }
-
-        // 编码参数
-        if let parameters = endpoint.parameters {
-            try encodeParameters(parameters, into: &request, encoding: endpoint.parameterEncoding)
-        }
-
-        return request
-    }
-
-    // MARK: - Parameter Encoding
-
-    private func encodeParameters(
-        _ parameters: [String: any Sendable],
-        into request: inout URLRequest,
-        encoding: ParameterEncoding
-    ) throws {
-        switch encoding {
-        case .url:
-            // URL 编码：所有值转为字符串拼接到 query string
-            let stringParams = parameters.mapValues { "\($0)" }
-            guard var components = URLComponents(
-                url: request.url!,
-                resolvingAgainstBaseURL: false
-            ) else {
-                throw NetworkError.invalidURL(request.url?.absoluteString ?? "")
-            }
-            let newItems = stringParams.map { URLQueryItem(name: $0.key, value: $0.value) }
-            var items = components.queryItems ?? []
-            items.append(contentsOf: newItems)
-            components.queryItems = items
-            request.url = components.url
-
-        case .json:
-            // JSON 编码：保留原始类型（Int/Bool/Array/Dict 等）
-            let jsonObject = parameters.mapValues { Self.toJSONCompatible($0) }
-            request.httpBody = try JSONSerialization.data(withJSONObject: jsonObject)
-            if request.value(forHTTPHeaderField: "Content-Type") == nil {
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            }
-
-        case .form:
-            // Form 编码：x-www-form-urlencoded
-            let stringParams = parameters.mapValues { "\($0)" }
-            var components = URLComponents()
-            components.queryItems = stringParams.map { URLQueryItem(name: $0.key, value: $0.value) }
-            request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
-            if request.value(forHTTPHeaderField: "Content-Type") == nil {
-                request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-            }
-        }
-    }
-
-    /// 将 `any Sendable` 转为 JSON 兼容类型，保留原始类型信息
-    private static func toJSONCompatible(_ value: any Sendable) -> Any {
-        switch value {
-        case let v as Bool: return v
-        case let v as Int: return v
-        case let v as Int64: return v
-        case let v as Double: return v
-        case let v as Float: return v
-        case let v as String: return v
-        case let v as [any Sendable]: return v.map { toJSONCompatible($0) }
-        case let v as [String: any Sendable]: return v.mapValues { toJSONCompatible($0) }
-        default: return "\(value)"
-        }
-    }
-
     // MARK: - Perform Request
 
     private func performRequest(
@@ -211,31 +192,66 @@ public struct NetworkClient: NetworkClientProtocol {
         session: Session,
         context: RequestContext
     ) async throws -> (Data, URLResponse) {
-        let response = await session.request(request).serializingData().response
+        // Alamofire 完整链路：
+        // 1. Interceptor.adapt() → 注入 headers/signing（Session 级配置）
+        // 2. URLSession 发送请求
+        // 3. .validate() → 校验 HTTP 状态码
+        // 4. 如果失败 → Interceptor.retry() → RetryPolicy 判断是否重试
+        // 5. .serializingData() → 获取原始 Data
+        let response = await session.request(request)
+            .validate(statusCode: 200..<300)
+            .serializingData()
+            .response
 
-        if let httpResponse = response.response {
-            let statusCode = httpResponse.statusCode
-            if !(200..<300).contains(statusCode) {
-                throw NetworkError.httpStatus(
-                    code: statusCode,
-                    data: response.data,
-                    requestID: context.id
-                )
-            }
-        }
-
-        guard let data = response.data else {
-            throw NetworkError.transport(
-                underlying: response.error ?? URLError(.badServerResponse),
+        if let afError = response.error {
+            throw NetworkError.from(
+                afError: afError,
+                response: response.response,
+                data: response.data,
                 requestID: context.id
             )
         }
 
-        if let afError = response.error, data.isEmpty {
-            throw NetworkError.transport(underlying: afError, requestID: context.id)
+        guard let data = response.data else {
+            throw NetworkError.transport(
+                underlying: URLError(.badServerResponse),
+                requestID: context.id
+            )
         }
 
         let urlResponse = response.response ?? URLResponse()
         return (data, urlResponse)
+    }
+
+    // MARK: - Cache Integration
+
+    /// 从内存缓存查找已缓存的响应
+    private func checkCache<T: Decodable & Sendable>(for endpoint: Endpoint<T>) -> T? {
+        guard case .memory = endpoint.cachePolicy else { return nil }
+        guard let cache = middlewares.lazy.compactMap({ $0 as? CacheMiddleware }).first else { return nil }
+        let urlString = (endpoint.baseURL ?? defaultBaseURL) + endpoint.path
+        guard let url = URL(string: urlString) else { return nil }
+        guard let data = cache.cachedData(for: url) else { return nil }
+        let context = RequestContext(endpoint: endpoint)
+        return try? decoder.decode(T.self, from: data, context: context)
+    }
+
+    /// 向 CacheMiddleware 注册缓存策略（didReceive 阶段使用）
+    private func registerCachePolicy<T>(_ endpoint: Endpoint<T>, context: RequestContext) {
+        guard case .memory = endpoint.cachePolicy else { return }
+        guard let cache = middlewares.lazy.compactMap({ $0 as? CacheMiddleware }).first else { return }
+        cache.registerPolicy(endpoint.cachePolicy, for: context.id)
+    }
+
+    // MARK: - Deduplication
+
+    /// 生成去重 key：method + path + 排序后的参数
+    private static func deduplicationKey<T>(for endpoint: Endpoint<T>) -> String {
+        var key = "\(endpoint.method.rawValue):\(endpoint.path)"
+        if let params = endpoint.parameters {
+            let sorted = params.keys.sorted().map { "\($0)=\(params[$0]!)" }
+            key += "?" + sorted.joined(separator: "&")
+        }
+        return key
     }
 }

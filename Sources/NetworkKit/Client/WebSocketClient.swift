@@ -46,6 +46,7 @@ public final actor WebSocketClient {
     private let autoReconnect: Bool
     private let maxReconnectAttempts: Int
     private let reconnectBaseDelay: TimeInterval
+    private let sessionPool: SessionPool
 
     private var task: URLSessionWebSocketTask?
     private var session: URLSession?
@@ -63,13 +64,15 @@ public final actor WebSocketClient {
         headers: [String: String] = [:],
         autoReconnect: Bool = true,
         maxReconnectAttempts: Int = 5,
-        reconnectBaseDelay: TimeInterval = 1.0
+        reconnectBaseDelay: TimeInterval = 1.0,
+        sessionPool: SessionPool = .shared
     ) {
         self.url = url
         self.headers = headers
         self.autoReconnect = autoReconnect
         self.maxReconnectAttempts = maxReconnectAttempts
         self.reconnectBaseDelay = reconnectBaseDelay
+        self.sessionPool = sessionPool
     }
 
     // MARK: - Connect / Disconnect
@@ -84,7 +87,7 @@ public final actor WebSocketClient {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        let session = URLSession(configuration: .default)
+        let session = sessionPool.makeDelegateSession(config: .websocket)
         let wsTask = session.webSocketTask(with: request)
 
         self.session = session

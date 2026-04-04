@@ -32,10 +32,6 @@ public struct RateLimitMiddleware: Middleware {
         await bucket.acquire()
         return request
     }
-
-    public func recover(from error: NetworkError, context: RequestContext) async throws -> RecoveryAction? {
-        nil
-    }
 }
 
 // MARK: - Token Bucket

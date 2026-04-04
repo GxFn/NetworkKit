@@ -1,5 +1,6 @@
 // MARK: - Network Error
 
+import Alamofire
 import Foundation
 
 /// 网络层统一错误类型
@@ -45,6 +46,50 @@ public enum NetworkError: Error, Sendable {
             return code
         }
         return nil
+    }
+
+    // MARK: - AFError Bridging
+
+    /// 从 Alamofire 响应结果智能构造 NetworkError
+    ///
+    /// 利用 AFError 的 rich subcases 精准分类错误来源，
+    /// 不再粗暴地将所有 AFError 归为 `.transport`。
+    static func from(
+        afError: AFError,
+        response: HTTPURLResponse?,
+        data: Data?,
+        requestID: String
+    ) -> NetworkError {
+        switch afError {
+        case .responseValidationFailed:
+            // Alamofire .validate() 触发的状态码校验失败
+            if let code = response?.statusCode {
+                return .httpStatus(code: code, data: data, requestID: requestID)
+            }
+            return .transport(underlying: afError, requestID: requestID)
+
+        case .responseSerializationFailed(let reason):
+            // 响应序列化失败 → 归为解码错误
+            if case .decodingFailed(let decodingError) = reason {
+                return .decoding(underlying: decodingError, rawData: data, requestID: requestID)
+            }
+            return .decoding(underlying: afError, rawData: data, requestID: requestID)
+
+        case .sessionTaskFailed(let underlying):
+            // URLSession 层错误 → 保留原始 URLError
+            return .transport(underlying: underlying, requestID: requestID)
+
+        case .createURLRequestFailed(let underlying):
+            // URLRequest 构建失败
+            return .invalidURL(underlying.localizedDescription)
+
+        case .requestAdaptationFailed, .requestRetryFailed:
+            // Interceptor 层错误
+            return .transport(underlying: afError, requestID: requestID)
+
+        default:
+            return .transport(underlying: afError, requestID: requestID)
+        }
     }
 }
 

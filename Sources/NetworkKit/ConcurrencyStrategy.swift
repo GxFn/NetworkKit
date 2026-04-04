@@ -25,7 +25,7 @@
 //    - 优先将所有可变字段合并到单一 State 结构体
 //    - 避免多锁（防止获取顺序不一致导致的死锁风险）
 //    - 适用：CircuitBreaker, RequestDeduplicator, MetricsCollector,
-//            NetworkReachability, TokenBucket, RequestContext
+//            MetricsCollector, TokenBucket, RequestContext
 //
 // 3. 复杂异步生命周期 → actor
 //    - 适用于有 connect/disconnect/receiveLoop 等异步生命周期的对象
@@ -60,7 +60,6 @@
 // | SessionPool          | class  | 无（init 后不可变）         | 否          |
 // | CircuitBreaker       | class  | OSAllocatedUnfairLock     | 否          |
 // | RequestDeduplicator  | class  | OSAllocatedUnfairLock     | 否          |
-// | NetworkReachability  | class  | OSAllocatedUnfairLock     | 否          |
 // | MetricsCollector     | class  | OSAllocatedUnfairLock ×2  | 否          |
 // | TokenBucket          | class  | OSAllocatedUnfairLock     | 否          |
 // | RequestContext       | class  | OSAllocatedUnfairLock     | 是(a)       |

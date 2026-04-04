@@ -38,6 +38,7 @@ public struct DownloadResult: Sendable {
 /// 断点续传下载客户端
 ///
 /// 基于 Alamofire 的 download + resumeData 实现。
+/// - 通过 `SessionPool` 共享 Interceptor / SSL / EventMonitor 配置
 /// - 自动管理 resumeData 持久化
 /// - 支持暂停/恢复/取消
 /// - 通过 `DownloadProgress` 回调实时进度
@@ -66,13 +67,14 @@ public final class DownloadClient: Sendable {
 
     private let session: Session
 
-    public init(session: Session? = nil) {
-        self.session = session ?? {
-            let config = URLSessionConfiguration.default
-            config.httpMaximumConnectionsPerHost = 3
-            config.timeoutIntervalForResource = 600
-            return Session(configuration: config)
-        }()
+    /// 使用 SessionPool 创建（推荐：共享 Interceptor/SSL/Monitor 配置）
+    public init(sessionPool: SessionPool = .shared) {
+        self.session = sessionPool.session(for: .download)
+    }
+
+    /// 使用自定义 Session 创建
+    public init(session: Session) {
+        self.session = session
     }
 
     /// 创建下载任务
@@ -206,6 +208,7 @@ public final actor DownloadTask {
         // 检查是否有 resumeData
         if let resumeData = loadResumeData() {
             request = session.download(resumingWith: resumeData, to: afDestination)
+                .validate(statusCode: 200..<300)
             logger.info("Download resuming: \(self.remoteURL.lastPathComponent) (\(resumeData.count) bytes resume data)")
         } else {
             var httpHeaders: HTTPHeaders?
@@ -213,6 +216,7 @@ public final actor DownloadTask {
                 httpHeaders = HTTPHeaders(headers.map { HTTPHeader(name: $0.key, value: $0.value) })
             }
             request = session.download(remoteURL, headers: httpHeaders, to: afDestination)
+                .validate(statusCode: 200..<300)
             logger.info("Download starting: \(self.remoteURL.lastPathComponent)")
         }
 
@@ -251,8 +255,10 @@ public final actor DownloadTask {
                 }
 
                 state = .failed
-                let networkError = NetworkError.transport(
-                    underlying: error,
+                let networkError = NetworkError.from(
+                    afError: error,
+                    response: response.response,
+                    data: nil,
                     requestID: UUID().uuidString
                 )
                 continuation?.resume(throwing: networkError)

@@ -31,8 +31,4 @@ public struct DefaultHeadersMiddleware: Middleware {
         }
         return request
     }
-
-    public func recover(from error: NetworkError, context: RequestContext) async throws -> RecoveryAction? {
-        nil
-    }
 }

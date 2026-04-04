@@ -25,8 +25,16 @@ public protocol Middleware: Sendable {
 // MARK: - Default Implementation
 
 extension Middleware {
+    public func adapt(_ request: URLRequest, context: RequestContext) async throws -> URLRequest {
+        request
+    }
+
     public func didReceive(data: Data, response: URLResponse, context: RequestContext) async throws -> Data {
         data
+    }
+
+    public func recover(from error: NetworkError, context: RequestContext) async throws -> RecoveryAction? {
+        nil
     }
 }
 
