@@ -6,6 +6,8 @@ import os
 /// 请求上下文：贯穿整个请求生命周期
 ///
 /// 携带唯一 ID + 元数据，用于日志链路追踪和中间件通信。
+///
+/// - Note: @unchecked Sendable — class 类型，唯一可变字段 retryCount 由 OSAllocatedUnfairLock 保护
 public final class RequestContext: @unchecked Sendable {
 
     /// 请求唯一标识 (UUID)
@@ -45,5 +47,14 @@ public final class RequestContext: @unchecked Sendable {
     /// 请求耗时 (秒)
     public var elapsed: TimeInterval {
         Date().timeIntervalSince(startTime)
+    }
+
+    /// 便捷初始化（用于 Upload 等非 Endpoint 场景）
+    public init(id: String, path: String) {
+        self.id = id
+        self.startTime = Date()
+        self.priority = .standard
+        self.requiresSigning = false
+        self.path = path
     }
 }

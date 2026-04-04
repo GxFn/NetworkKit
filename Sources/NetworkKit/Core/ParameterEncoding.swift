@@ -10,4 +10,7 @@ public enum ParameterEncoding: Sendable {
 
     /// JSON body 编码（POST/PUT 等）
     case json
+
+    /// Form body 编码（application/x-www-form-urlencoded）
+    case form
 }

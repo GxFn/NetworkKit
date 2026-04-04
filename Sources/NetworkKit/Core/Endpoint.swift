@@ -20,6 +20,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
     public let priority: RequestPriority
     public let requiresSigning: Bool
     public let timeout: TimeInterval?
+    public let cachePolicy: CachePolicy
 
     public init(
         path: String,
@@ -29,7 +30,8 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         parameterEncoding: ParameterEncoding = .url,
         priority: RequestPriority = .standard,
         requiresSigning: Bool = false,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        cachePolicy: CachePolicy = .none
     ) {
         self.path = path
         self.baseURL = baseURL
@@ -39,5 +41,6 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         self.priority = priority
         self.requiresSigning = requiresSigning
         self.timeout = timeout
+        self.cachePolicy = cachePolicy
     }
 }

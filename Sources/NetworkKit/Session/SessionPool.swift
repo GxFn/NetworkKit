@@ -2,7 +2,6 @@
 
 import Alamofire
 import Foundation
-import os
 
 /// 会话池：管理多个独立的 Alamofire Session
 ///
@@ -16,20 +15,18 @@ public final class SessionPool: Sendable {
     private let liveSession: Session
     private let prefetchSession: Session
 
-    let activityMonitor = ActivityMonitor()
-
     public init(
         apiConfig: SessionConfig = .api,
         liveConfig: SessionConfig = .live,
         prefetchConfig: SessionConfig = .prefetch
     ) {
-        let monitors: [any EventMonitor] = [activityMonitor]
-        self.apiSession = Self.makeSession(config: apiConfig, monitors: monitors)
-        self.liveSession = Self.makeSession(config: liveConfig, monitors: monitors)
-        self.prefetchSession = Self.makeSession(config: prefetchConfig, monitors: monitors)
+        self.apiSession = Self.makeSession(config: apiConfig)
+        self.liveSession = Self.makeSession(config: liveConfig)
+        self.prefetchSession = Self.makeSession(config: prefetchConfig)
     }
 
-    func session(for priority: RequestPriority) -> Session {
+    /// 根据优先级获取对应的 Session
+    public func session(for priority: RequestPriority) -> Session {
         switch priority {
         case .standard: return apiSession
         case .realtime: return liveSession
@@ -37,10 +34,7 @@ public final class SessionPool: Sendable {
         }
     }
 
-    private static func makeSession(
-        config: SessionConfig,
-        monitors: [any EventMonitor]
-    ) -> Session {
+    private static func makeSession(config: SessionConfig) -> Session {
         let urlConfig = URLSessionConfiguration.default
         urlConfig.timeoutIntervalForRequest = config.requestTimeout
         urlConfig.timeoutIntervalForResource = config.resourceTimeout
@@ -48,7 +42,7 @@ public final class SessionPool: Sendable {
         urlConfig.networkServiceType = config.serviceType
         urlConfig.waitsForConnectivity = config.waitsForConnectivity
 
-        return Session(configuration: urlConfig, eventMonitors: monitors)
+        return Session(configuration: urlConfig)
     }
 }
 
@@ -102,42 +96,4 @@ public struct SessionConfig: Sendable {
         serviceType: .background,
         waitsForConnectivity: true
     )
-}
-
-// MARK: - Activity Monitor
-
-/// 网络活跃请求监控器
-final class ActivityMonitor: EventMonitor, @unchecked Sendable {
-
-    let queue = DispatchQueue(label: "com.networkkit.activityMonitor")
-
-    private let activeRequestIDs = OSAllocatedUnfairLock(initialState: Set<UUID>())
-
-    /// 当前活跃请求数
-    var activeCount: Int {
-        activeRequestIDs.withLock { $0.count }
-    }
-
-    /// 是否有活跃请求
-    var isActive: Bool {
-        activeCount > 0
-    }
-
-    // MARK: - EventMonitor 回调
-
-    func requestDidResume(_ request: Request) {
-        activeRequestIDs.withLock { $0.insert(request.id) }
-    }
-
-    func requestDidSuspend(_ request: Request) {
-        activeRequestIDs.withLock { $0.remove(request.id) }
-    }
-
-    func requestDidCancel(_ request: Request) {
-        activeRequestIDs.withLock { $0.remove(request.id) }
-    }
-
-    func requestDidFinish(_ request: Request) {
-        activeRequestIDs.withLock { $0.remove(request.id) }
-    }
 }
