@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "NetworkKit",
+    name: "AOXNetworkKit",
     platforms: [.iOS(.v16), .macOS(.v13)],
     products: [
-        .library(name: "NetworkKit", targets: ["NetworkKit"]),
+        .library(name: "AOXNetworkKit", targets: ["AOXNetworkKit"]),
     ],
     dependencies: [
         .package(url: "https://github.com/Alamofire/Alamofire.git", from: "5.9.0"),
     ],
     targets: [
         .target(
-            name: "NetworkKit",
+            name: "AOXNetworkKit",
             dependencies: ["Alamofire"]
         ),
     ]
