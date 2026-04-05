@@ -1,4 +1,4 @@
-# NetworkKit
+# AOXNetworkKit
 
 基于 Alamofire 的轻量级类型安全网络层，零业务耦合。
 
@@ -12,7 +12,7 @@
 
 ## 要求
 
-- iOS 16+ / macOS 13+
+- iOS 16+
 - Swift 6.0
 - Alamofire 5.9+
 
@@ -21,13 +21,13 @@
 ### Swift Package Manager
 
 ```swift
-.package(url: "https://github.com/YourOrg/NetworkKit.git", from: "0.1.0")
+.package(url: "https://github.com/GxFn/AOXNetworkKit.git", from: "0.1.0")
 ```
 
 ## 快速使用
 
 ```swift
-import NetworkKit
+import AOXNetworkKit
 
 // 1. 定义端点
 extension Endpoint where Response == MyResponse {
@@ -47,22 +47,14 @@ let response = try await client.send(.fetchItems(page: 1))
 ## 架构
 
 ```
-NetworkKit/
-├── Endpoint.swift          — 类型安全请求描述
-├── NetworkClient.swift     — 核心客户端（请求发送 + 中间件编排）
-├── NetworkError.swift      — 统一错误类型
-├── RequestContext.swift     — 请求上下文（ID + 元数据）
-├── ResponseDecoder.swift   — 响应解码 + 自动校验
-├── SessionPool.swift       — Multi-Session 连接池
-├── HTTPMethod.swift        — HTTP 方法（不暴露 Alamofire）
-├── ParameterEncoding.swift — 参数编码方式
-├── RequestPriority.swift   — 请求优先级
-├── RequestSigner.swift     — 签名协议
-└── Middleware/
-    ├── Middleware.swift         — 中间件协议 + RecoveryAction
-    ├── SigningMiddleware.swift  — 通用签名中间件
-    ├── RetryMiddleware.swift    — 指数退避重试
-    └── LogMiddleware.swift      — 结构化日志
+AOXNetworkKit/
+├── Core/               — Endpoint, HTTPMethod, NetworkError, ResponseDecoder
+├── Client/             — NetworkClient, DownloadClient, UploadClient, WebSocketClient
+├── Session/            — SessionPool, RetryPolicy, SSLPinning, RequestSigner
+├── Middleware/          — 可插拔中间件链
+├── Monitor/            — MetricsCollector, NetworkEventMonitor
+├── Resilience/         — CircuitBreaker, RequestDeduplicator
+└── Testing/            — MockClient
 ```
 
 ## License
