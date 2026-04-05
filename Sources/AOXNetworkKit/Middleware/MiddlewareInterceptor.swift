@@ -62,7 +62,7 @@ public struct MiddlewareAdapter: RequestAdapter {
 /// // Session 级别：无状态 adapter + 传输层重试
 /// let interceptor = makeInterceptor(
 ///     adapters: [
-///         MiddlewareAdapter(DefaultHeadersMiddleware(headers: ["User-Agent": "BiliDili/1.0"])),
+///         MiddlewareAdapter(DefaultHeadersMiddleware(headers: ["User-Agent": "MyApp/1.0"])),
 ///     ],
 ///     retryPolicy: NetworkKitRetryPolicy(retryLimit: 3)
 /// )
@@ -70,7 +70,7 @@ public struct MiddlewareAdapter: RequestAdapter {
 ///
 /// // Pipeline 级别：有状态中间件（需要 RequestContext）
 /// let client = NetworkClient(
-///     defaultBaseURL: "https://api.bilibili.com",
+///     defaultBaseURL: "https://api.example.com",
 ///     sessionPool: pool,
 ///     middlewares: [SigningMiddleware(signer: wbi), RateLimitMiddleware(...), CacheMiddleware()]
 /// )
