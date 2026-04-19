@@ -5,6 +5,34 @@ import os
 
 private let logger = Logger(subsystem: "com.networkkit", category: "WebSocket")
 
+/// Ensures a CheckedContinuation is resumed at most once.
+/// URLSession may invoke sendPing completion more than once during teardown
+/// (task cancel + session invalidate), which would crash with CheckedContinuation.
+private final class ContinuationOnceGuard<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, any Error>?
+
+    init(_ continuation: CheckedContinuation<T, any Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: T) {
+        lock.lock()
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume(returning: value)
+    }
+
+    func resume(throwing error: any Error) {
+        lock.lock()
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume(throwing: error)
+    }
+}
+
 /// WebSocket 消息类型
 public enum WebSocketMessage: Sendable {
     case text(String)
@@ -78,6 +106,11 @@ public final actor WebSocketClient {
     // MARK: - Connect / Disconnect
 
     /// 建立连接
+    ///
+    /// 不使用 sendPing 验证握手，因为 URLSessionWebSocketTask.sendPing 的回调
+    /// 在 delegate 为 nil 或握手未完成时可能永远不触发，导致连接永久挂起。
+    /// 改为乐观启动接收循环：handshake 成功 → receive() 正常返回数据；
+    /// 失败 → receive() 抛错 → handleDisconnect 处理重连。
     public func connect() async throws {
         intentionalDisconnect = false
         reconnectCount = 0
@@ -96,23 +129,8 @@ public final actor WebSocketClient {
 
         wsTask.resume()
 
-        // 用 ping 验证连接是否真的建立
-        do {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-                wsTask.sendPing { error in
-                    if let error {
-                        cont.resume(throwing: error)
-                    } else {
-                        cont.resume()
-                    }
-                }
-            }
-            self.state = .connected
-            logger.info("WebSocket connected: \(self.url.absoluteString)")
-        } catch {
-            cleanup(reason: "Connection failed: \(error.localizedDescription)")
-            throw NetworkError.transport(underlying: error, requestID: UUID().uuidString)
-        }
+        self.state = .connected
+        logger.info("WebSocket connected: \(self.url.absoluteString)")
 
         startReceiveLoop()
     }
@@ -147,19 +165,18 @@ public final actor WebSocketClient {
 
     // MARK: - Message Stream
 
-    /// 消息接收 AsyncStream（可多次调用，每个调用者获得独立的 stream）
-    public nonisolated var messages: AsyncStream<WebSocketMessage> {
-        AsyncStream { continuation in
-            let id = UUID()
-            Task { await self.addContinuation(continuation, id: id) }
-            continuation.onTermination = { _ in
-                Task { await self.removeContinuation(id: id) }
-            }
-        }
-    }
-
-    private func addContinuation(_ continuation: AsyncStream<WebSocketMessage>.Continuation, id: UUID) {
+    /// 创建消息接收 AsyncStream（可多次调用，每个调用者获得独立的 stream）
+    ///
+    /// 作为 actor 方法调用，保证 continuation 在返回前同步注册，
+    /// 避免使用非结构化 Task 异步注册时消息被广播到空 continuations 的竞态。
+    public func messageStream() -> AsyncStream<WebSocketMessage> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: WebSocketMessage.self)
         continuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { [weak self] in await self?.removeContinuation(id: id) }
+        }
+        return stream
     }
 
     private func removeContinuation(id: UUID) {
@@ -171,11 +188,12 @@ public final actor WebSocketClient {
     /// 发送 ping
     public func ping() async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+            let once = ContinuationOnceGuard(cont)
             task?.sendPing { error in
                 if let error {
-                    cont.resume(throwing: error)
+                    once.resume(throwing: error)
                 } else {
-                    cont.resume()
+                    once.resume(returning: ())
                 }
             }
         }
